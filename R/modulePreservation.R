@@ -718,36 +718,17 @@ modulePreservation = function(
 
 .coreCalcForAdj = function(datRef, datRefP, datTest, colors, opt)
 {
-#  printFlush(".coreCalcForAdj:entering");
   colorLevels = levels(factor(colors))
   nMods =length(colorLevels)
   nGenes = length(colors);
 
-  gold = substring(opt$MEgold, 3);
-  grey = substring(opt$MEgrey, 3);
-
-  # Flag modules whose size is 1
-  modSizes = table(colors)
-  act = (modSizes>1)
-
   svds=list()
   kIM = list();
-  #printFlush(".coreCalcForAdj:getting svds and kIM");
-  if (!opt$densityOnly)
-  {            
-     svds[[1]] = .getSVDs(datRef, colors);
-     kIM[[1]] = .kIM(datRef, colors, calculateAll = opt$calculateCor.kIMall);
-  }
-   
-  if (opt$calculatePermutation | opt$densityOnly)
-  {
-    svds[[2]] = .getSVDs(datRefP, colors);
-    kIM[[2]] = .kIM(datRefP, colors, calculateAll = opt$calculateCor.kIMall);
-  } else {
-    svds[[2]] = svds[[1]];
-    kIM[[2]] = kIM[[1]];
-  }
-
+         
+  svds[[1]] = .getSVDs(datRef, colors);
+  kIM[[1]] = .kIM(datRef, colors, calculateAll = opt$calculateCor.kIMall);
+  svds[[2]] = .getSVDs(datRefP, colors);
+  kIM[[2]] = .kIM(datRefP, colors, calculateAll = opt$calculateCor.kIMall);
   svds[[3]] = .getSVDs(datTest, colors);
   kIM[[3]] = .kIM(datTest, colors, calculateAll = opt$calculateCor.kIMall);
 
@@ -761,59 +742,36 @@ modulePreservation = function(
     proVar[m, 2] = svds[[3]][[m]]$d[1]/sum(svds[[3]][[m]]$d); 
   }
 
-  #printFlush(".coreCalcForAdj:getting corkME and ICOR");
   corkME = rep(NA, nMods);
   corkMEall = rep(NA, nMods);
   corkIM = rep(NA, nMods);
   ICORdat = rep(NA,nMods)
-  if (!opt$densityOnly)
+   
+  for(m in 1:nMods )
   {
-     for(m in 1:nMods ) if(act[m])
-     {
-        nModGenes=modSizes[m];
-        corExpr = parse(text=paste(opt$corFnc, "(svds[[1]][[m]]$u,svds[[3]][[m]]$u",
-                                                prepComma(opt$corOptions), ")"));
-        corkME[m] = abs(eval(corExpr));
+     nModGenes=modSizes[m];
+     corExpr = parse(text=paste(opt$corFnc, "(svds[[1]][[m]]$u,svds[[3]][[m]]$u",
+                                             prepComma(opt$corOptions), ")"));
+     corkME[m] = abs(eval(corExpr));
+     corExpr = parse(text=paste(opt$corFnc, "(kIM[[1]][modGenes[[m]],m],kIM[[3]][modGenes[[m]],m] ", 
+                                prepComma(opt$corOptions), ")"));
+     corkIM[m] = eval(corExpr);
 
-        if (opt$calculateCor.kIMall)
-        {
-          corExpr = parse(text=paste(opt$corFnc, "(kIM[[1]][,m],kIM[[3]][,m] ", 
-                                                prepComma(opt$corOptions), ")"));
-          corkMEall[m] = eval(corExpr);
-        }
-
-        corExpr = parse(text=paste(opt$corFnc, "(kIM[[1]][modGenes[[m]],m],kIM[[3]][modGenes[[m]],m] ", 
-                                   prepComma(opt$corOptions), ")"));
-        corkIM[m] = eval(corExpr);
-
-        adj1 = datRef[modGenes[[m]], modGenes[[m]]];
-        adj2 = datTest[modGenes[[m]], modGenes[[m]]];
-        corExpr = parse(text=paste(opt$corFnc, "(c(as.dist(adj1)), c(as.dist(adj2))",
-                                   prepComma(opt$corOptions), ")"));
-        ICORdat[m] = eval(corExpr);
-     }
+     adj1 = datRef[modGenes[[m]], modGenes[[m]]];
+     adj2 = datTest[modGenes[[m]], modGenes[[m]]];
+     corExpr = parse(text=paste(opt$corFnc, "(c(as.dist(adj1)), c(as.dist(adj2))",
+                                prepComma(opt$corOptions), ")"));
+     ICORdat[m] = eval(corExpr);
   }
       
   meanSignAwareKME=matrix(NA, nMods ,2)
   meankIM=matrix(NA, nMods ,2)
-  for(m in 1:nMods ) if(act[m])
+  for(m in 1:nMods )
   {       
      meankIM[m, 1] = mean(kIM[[2]][modGenes[[m]], m], na.rm = TRUE)
      meankIM[m, 2] = mean(kIM[[3]][modGenes[[m]], m], na.rm = TRUE)
-     if (opt$densityOnly)
-     {
-        if (opt$nType==1)
-        {
-          meanSignAwareKME[m,1]=mean(abs(svds[[2]][[m]]$u),na.rm = TRUE)
-          meanSignAwareKME[m,2]=mean(abs(svds[[3]][[m]]$u),na.rm = TRUE)
-        } else {
-          meanSignAwareKME[m,1]=abs(mean(svds[[2]][[m]]$u,na.rm = TRUE))
-          meanSignAwareKME[m,2]=abs(mean(svds[[3]][[m]]$u,na.rm = TRUE))
-        }
-     } else {
-        meanSignAwareKME[m,1]=mean(abs(svds[[2]][[m]]$u),na.rm = TRUE)
-        meanSignAwareKME[m,2]=abs(mean(sign(svds[[1]][[m]]$u) * svds[[3]][[m]]$u,na.rm = TRUE))
-     }
+     meanSignAwareKME[m,1]=mean(abs(svds[[2]][[m]]$u),na.rm = TRUE)
+     meanSignAwareKME[m,2]=abs(mean(sign(svds[[1]][[m]]$u) * svds[[3]][[m]]$u,na.rm = TRUE))
   }
   
   MeanAdj = matrix(NA, nMods, 2);
@@ -822,30 +780,20 @@ modulePreservation = function(
   corMAR = rep(NA, nMods);
   meanCC = matrix(NA,nMods ,2)
   meanMAR = matrix(NA,nMods ,2)
-  for (m in 1:nMods) if (act[m])
+  for (m in 1:nMods)
   {
     modAdj = datRefP[modGenes[[m]], modGenes[[m]]];
-    if (opt$calculateClusterCoeff) ccRefP = .clusterCoeff(modAdj);
     marRefP = .MAR(modAdj);
     meanMAR[m, 1] = mean(marRefP);
     MeanAdj[m,1]=mean(as.dist(modAdj), na.rm = TRUE);
 
     modAdj = datRef[modGenes[[m]], modGenes[[m]]];
-    if (opt$calculateClusterCoeff) ccRef = .clusterCoeff(modAdj);
     marRef = .MAR(modAdj);
   
     modAdj = datTest[modGenes[[m]], modGenes[[m]]];
-    if (opt$calculateClusterCoeff) ccTest = .clusterCoeff(modAdj);
     marTest = .MAR(modAdj);
     MeanAdj[m,2] = mean(as.dist(modAdj), na.rm = TRUE);
-
-    if (opt$calculateClusterCoeff)
-    {
-      meanCC[m, 1] = mean(ccRefP);
-      meanCC[m, 2] = mean(ccTest);
-      corExpr = parse(text=paste(opt$corFnc, "(ccRef, ccTest ", prepComma(opt$corOptions), ")"));
-      corCC[m] = eval(corExpr);
-    }
+     
     meanMAR[m, 2] = mean(marTest);
     corExpr = parse(text=paste(opt$corFnc, "(marRef, marTest ", prepComma(opt$corOptions), ")"));
     corMAR[m] = eval(corExpr);
