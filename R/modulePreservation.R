@@ -1,116 +1,3 @@
-# module preservation for networks specified by adjacency matrices, not expression data.
-# this version can handle both expression and adjacency matrices.
-
-# 
-# Changelog:
-
-# 2010/08/04: 
-#   . Adding clusterCoeff and MAR to density preservation statistics
-#   . Adding cor.clusterCoeff and cor.MAR to connectivity preservation statistics
-#   . Adding silhuette width to separability statistics
-
-# Adding p-values to output. For each Z score can add a corresponding p-value, bonferoni corrected p-value,
-# and q value (local FDR)
-
-
-#=====================================================================================================
-#
-# p-value functions
-#
-#=====================================================================================================
-# Assumes Z in the form of a list, Z[[ref]][[test]] is a matrix of Z scores except the first column is
-# assumed to be moduleSize. 
-# Returned value is log10 of the p-value
-
-.pValueFromZ = function(Z, bonf = FALSE, summaryCols = NULL, summaryInd = NULL)
-{
-  p = Z # This carries over all necessary names and missing values when ref==test
-  nRef = length(Z);
-  for (ref in 1:nRef)
-  {
-    nTest = length(Z[[ref]])
-    for (test in 1:nTest)
-    {
-      zz = Z[[ref]][[test]];
-      if (length(zz) > 1)
-      {
-        names = colnames(zz);
-        # Try to be a bit intelligent about whether to ignore the first column
-        if (names[1]=="moduleSize") ignoreFirst = TRUE else ignoreFirst = FALSE;
-        ncol = ncol(zz);
-        range = c( (1+as.numeric(ignoreFirst)):ncol);
-        p[[ref]][[test]][, range] = pnorm(as.matrix(zz[, range]), lower.tail = FALSE, log.p = TRUE)/log(10);
-        Znames = names[range]
-        if (bonf)
-        {
-           pnames = sub("Z", "log.p.Bonf", Znames, fixed= TRUE);
-           p[[ref]][[test]][, range] = p[[ref]][[test]][, range] + log10( nrow(p[[ref]][[test]]));
-           biggerThan1 = p[[ref]][[test]][, range] > 0;
-           p[[ref]][[test]][, range][biggerThan1] = 0; # Remember that the p-values are stored in log form
-        } else
-           pnames = sub("Z", "log.p", Znames, fixed= TRUE);
-        if (!is.null(summaryCols)) for (c in 1:length(summaryCols))
-        {
-          medians = apply(p[[ref]][[test]][, summaryInd[[c]], drop = FALSE], 1, median, na.rm = TRUE)
-          p[[ref]][[test]][,summaryCols[c]] = medians
-        }
-        colnames(p[[ref]][[test]])[range] = pnames;
-      } 
-    }
-  }
-  p;
-}
-
-.qValueFromP = function(p, summaryCols = NULL, summaryInd = NULL)
-{
-  q = p # This carries over all necessary names and missing values when ref==test
-  nRef = length(p);
-  for (ref in 1:nRef)
-  {
-    nTest = length(p[[ref]])
-    for (test in 1:nTest)
-    {
-      pp = p[[ref]][[test]];
-      if (length(pp) > 1)
-      {
-        names = colnames(pp);
-        # Try to be a bit intelligent about whether to ignore the first column
-        if (names[1]=="moduleSize")
-        {
-           ignoreFirst = TRUE 
-        } else
-           ignoreFirst = FALSE;
-        ncol = ncol(pp);
-        nrow = nrow(pp);
-        range = c( (1+as.numeric(ignoreFirst)):ncol);
-        for (col in range)
-        {
-          xx = try(qvalue(10^pp[,col]), silent = TRUE)
-          if (class(xx)=="try-error" || length(xx)==1)
-          {
-            q[[ref]][[test]][, col] = rep(NA, nrow);
-            printFlush(paste("Warning in modulePreservation: qvalue calculation failed for",
-                             "column", col, "for reference set", ref, "and test set", test))
-          } else 
-            q[[ref]][[test]][, col] = xx$qvalues;
-        }
-        colnames(q[[ref]][[test]])[range] = sub("log.p", "q", names[range], fixed= TRUE);
-        if (!is.null(summaryCols)) for (c in 1:length(summaryCols))
-        {
-          xx = log10(as.matrix(q[[ref]][[test]][, summaryInd[[c]], drop = FALSE]));
-          # Restrict all -logs > 1000 to 1000:
-          xx[!is.na(xx) & !is.finite(xx)] = -1000;
-          xx[!is.na(xx) & (xx < -1000)] = -1000;
-          medians  = apply(xx, 1, median, na.rm = TRUE)
-          q[[ref]][[test]][, summaryCols[c]] = 10^medians;
-        }
-      }
-    }
-  }
-  q;
-}
-
-
 modulePreservation = function(
    multiData,
    multiColor,
@@ -145,219 +32,10 @@ modulePreservation = function(
    parallelCalculation = FALSE,
    verbose = 1, indent = 0)
 {
-   sAF = options("stringsAsFactors")
-   options(stringsAsFactors = FALSE);
-   on.exit(options(stringsAsFactors = sAF[[1]]), TRUE)
-
-   if (!is.null(randomSeed))
-   {
-     if (exists(".Random.seed"))
-     {
-        savedSeed = .Random.seed
-        on.exit({.Random.seed <<- savedSeed;}, TRUE);
-     }
-     set.seed(randomSeed);
-   }
-
-   spaces = indentSpaces(indent);
-
-   nType = charmatch(networkType, .networkTypes);
-   if (is.na(nType))
-      stop(paste("Unrecognized networkType argument.",
-           "Recognized values are (unique abbreviations of)", paste(.networkTypes, collapse = ", ")));
-
-   # Check that the multiData/multiAdj has correct structure
-
-   nNets = length(multiData);
-   nGenes = sapply(multiData, sapply, ncol);
-   if (checkData)
-   {
-     if (dataIsExpr)
-     {  
-       .checkExpr(multiData, verbose, indent)
-     } else {
-       .checkAdj(multiData, verbose, indent)
-     }
-   }
-
-   if (!is.null(multiWeights))
-   {
-     if (dataIsExpr) {
-       multiWeights = .checkAndScaleMultiWeights(multiWeights, multiData, scaleByMax = FALSE);
-     } else
-       stop("Weights cannot be supplied when 'dataIsExpr' is FALSE.");
-   }
-
-   # Check for presence of dimnames, assign if none, and make them unique.
-
-   multiData = mtd.apply(multiData, function(.data)
-   {
-     if (is.null(colnames(.data))) colnames(.data) = spaste("Column.", 1:ncol(.data));
-     colnames(.data) = make.unique(colnames(.data));
-     .data;
-   });
-
-   if (!dataIsExpr)
-   {
-     multiData = mtd.apply(multiData, function(.data)
-     {
-        rownames(.data) = colnames(.data);
-        .data;
-     });
-   }
-
-
-   # Check for names; if there are none, create artificial labels.
-   setNames = names(multiData);
-   if (is.null(setNames))
-   {
-     setNames = paste("Set", c(1:nNets), sep="");
-   } 
-
-   # Check that referenceNetworks is valid
-
-   referenceNetworks = as.numeric(referenceNetworks);
-   if (any(is.na(referenceNetworks)))
-      stop("All elements of referenceNetworks must be numeric and present.");
-
-   if (any(referenceNetworks < 1) | any(referenceNetworks > nNets))
-      stop("referenceNetworks contains elements outside of the allowed range. ");
-
-   nRefNets = length(referenceNetworks);
-
-   # Check testNetworks
-
-   if (is.null(testNetworks))
-   {
-      testNetworks = list();
-      for (ref in 1:nRefNets) testNetworks[[ref]] = c(1:nNets)[ -referenceNetworks[ref] ];
-   }
-
-   # Check that testNetworks was specified correctly
-   if (!is.list(testNetworks) && nRefNets > 1) 
-     stop("When there are more than 1 reference networks, 'testNetworks' must\n",
-          "  be a list with one component per reference network.");
-
-   if (!is.list(testNetworks)) testNetworks = list(testNetworks);
-
-   if (length(testNetworks)!=nRefNets) 
-     stop("Length of 'testNetworks' must be the same as length of 'referenceNetworks'.");
-
-   for (ref in 1:nRefNets)
-   {
-     if (any(testNetworks[[ref]] < 1 || testNetworks[[ref]] > nNets))
-       stop("Some entries of testNetworks[[", ref, "]] are out of range.");
-   }
-   
-   # Check multiColor
-
-   if (class(multiColor)!="list")
-   {
-       stop("multiColor does not appear to have the correct format.")
-   }
-
-   if (length(multiColor)!=nNets)
-   {
-     multiColor2=list()
-     if (length(names(multiColor))!=length(multiColor))
-       stop("Each entry of 'multiColor' must have a name.");
-     color2expr = match(names(multiColor), setNames);
-     if (any(is.na(color2expr)))
-       stop("Entries of 'multiColor' must name-match entries in 'multiData'.");
-     for(s in 1:nNets)
-     {
-        #multiData[[s]]$data = as.matrix(multiData[[s]]$data);
-        loc = which(names(multiColor) %in% setNames[s])
-        if (length(loc)==0)
-        {
-          multiColor2[[s]] = NA
-        } else
-          multiColor2[[s]]=multiColor[[loc]]
-     }
-     multiColor = multiColor2
-     rm(multiColor2);
-   }
-
-   s = 1; while ( (s <= nNets) & !.cvPresent(multiColor[[s]])) s = s+1;
-   if (s==nNets+1)
-     stop("No valid color lists found.")
-
-   if (is.null(greyName))
-   {
-     if (is.numeric(multiColor[[s]]))  # Caution: need a valid s here.
-     {
-       greyName = 0
-     } else {
-       greyName = "grey"
-     }
-   } else  {
-     if (is.null(goldName)) goldName = if (is.numeric(greyName)) 0.1 else "gold"
-   }
-
-   if (is.null(goldName))
-   {
-     if (is.numeric(multiColor[[s]]))  # Caution: need a valid s here.
-     {
-       goldName = 0.1;
-     } else {
-       goldName = "gold"
-     }
-   } 
-
-   if (verbose > 2) printFlush(paste("  ..unassigned 'module' name:", greyName, 
-                                     "\n  ..all network sample 'module' name:", goldName));
-
-   MEgrey = paste("ME", greyName, sep="");
-   MEgold = paste("ME", goldName, sep="");
-
-   for (s in 1:nNets)
-   {
-     if ( .cvPresent(multiColor[[s]]) & nGenes[s]!=length(multiColor[[s]]))
-       stop(paste("Color vector for set", s, "does not have the correct number of entries."));
-     if (is.factor(multiColor[[s]])) multiColor[[s]] = as.character(multiColor[[s]]);
-   }
-
-   keepGenes = list();
-   nNAs = sapply(multiColor, .nNAColors)
-   if (any(nNAs > 0))
-   {
-     if (verbose > 0) printFlush(paste(spaces, " ..removing genes with missing color..."))
-     for (s in 1:nNets)
-       if (.cvPresent(multiColor[[s]]))
-       {
-          keepGenes[[s]] = !is.na(multiColor[[s]]);
-          if (dataIsExpr)
-          {
-             multiData[[s]]$data = multiData[[s]]$data[, keepGenes[[s]]];
-          } else
-             multiData[[s]]$data = multiData[[s]]$data[keepGenes[[s]], keepGenes[[s]]];
-          multiColor[[s]] = multiColor[[s]][keepGenes[[s]]];
-       }
-   }
-
-   # Check for set names; if there are none, create artificial labels.
-
-   if (is.null(names(multiData)))
-   {
-     setNames = paste("Set_", c(1:nNets), sep="");
-   } else {
-     setNames = names(multiData);
-   }
-
-   # Check that multiData has valid colnames
-
-   for (s in 1:nNets)
-      if (is.null(colnames(multiData[[s]]$data))) 
-         stop(paste("Matrix of data in set", names(multiData)[s], 
-                    "has no colnames. Colnames are needed to match variables."));
-
    # For now we use numeric labels for permutations.
    permGoldName = 0.1;
    permGreyName = 0;
-
-   gc();
-
-   if (verbose > 0) printFlush(paste(spaces, " ..calculating observed preservation values"))
+  
    observed = .modulePreservationInternal(multiData, multiColor, multiWeights = multiWeights, dataIsExpr = dataIsExpr,
                      calculatePermutation = FALSE, networkType = networkType,
                      referenceNetworks = referenceNetworks, 
@@ -374,426 +52,127 @@ modulePreservation = function(
                      checkData = FALSE, greyName = greyName, goldName = goldName,
                      verbose = verbose -3, indent = indent + 2);
 
-   if (nPermutations==0) return(list(observed = observed))
-
    # Calculate preservation scores in permuted data.
 
-   psLoaded = FALSE;
-   if (loadPermutedStatistics)
-   {
-     cat(paste(spaces, "..attempting to load permutation statistics.."));
-     x = try(load(file=permutedStatisticsFile), silent = TRUE);
-     if (class(x)=="try-error")
+    psLoaded = FALSE;
+    nRegStats = 20;
+    nFixStats = 3;
+    permOut=list()      
+    regModuleSizes = list();
+    regModuleNames = list();      permutationsPresent = matrix(FALSE, nNets, nRefNets);
+    interpolationUsed = matrix(FALSE, nNets, nRefNets);
+
+    for(iref in 1:nRefNets)   # Loop over reference networks
+    {
+     ref = referenceNetworks[iref]
+     permOut[[iref]] = list()      
+     regModuleSizes[[iref]] = list();
+     regModuleNames[[iref]] = list();
+     nRefMods = length(unique(multiColor[[ref]]));
+
+     for (tnet in 1:nNets)
      {
-       printFlush(paste("failed. Error message returned by system:\n", x));
-     } else {
-       expectVars = c("regModuleSizes", "regStatNames", "regModuleNames", "fixStatNames", "fixModuleNames", 
-                      "permutationsPresent", "permOut", "interpolationUsed");
-       e2x = match(expectVars, x);
-       if (any(is.na(e2x)) | length(x)!=length(expectVars))
-       {
-         printFlush(paste("the file does not contain (all) expected variables."));
-       } else if (length(permOut) != length(referenceNetworks))
-       {
-         printFlush("the loaded permutation statistics have incorrect number of reference sets.");
-       } else if (length(permOut[[1]]) != nNets)
-       {
-         printFlush("the loaded permutation statistics have incorrect number of test sets.");
-       } else {
-         psLoaded = TRUE;
-         printFlush("success.");
-       }
-     }
-     if (!psLoaded)
-       printFlush(paste(spaces, "\n ..will recalculate permutations.", 
-                                "Hit Ctrl-C (Esc in Windows) to stop the calculation."));
-   }
-
-   nRegStats = 20;
-   nFixStats = 3;
-   
-   if (!psLoaded)
-   {
-      permOut=list()      
-      regModuleSizes = list();
-      regModuleNames = list();      permutationsPresent = matrix(FALSE, nNets, nRefNets);
-      interpolationUsed = matrix(FALSE, nNets, nRefNets);
-      if (verbose > 0) printFlush(paste(spaces, " ..calculating permutation Z scores"))
-      for(iref in 1:nRefNets)   # Loop over reference networks
-      {
-         ref = referenceNetworks[iref]
-         if (verbose > 0) printFlush(paste(spaces, "..Working with set", ref, "as reference set"));
-         permOut[[iref]] = list()      
-         regModuleSizes[[iref]] = list();
-         regModuleNames[[iref]] = list();
-         nRefMods = length(unique(multiColor[[ref]]));
-         if (nRefMods==1)
-         {
-           printFlush(paste(spaces, "*+*+*+*+* Reference set contains a single module.\n", 
-                            spaces, 
-                            "A permutation analysis is not meaningful for a single module; skipping."))
-           next;
-         }
-         for (tnet in 1:nNets) if (tnet %in% testNetworks[[iref]])
-         {
-            # Retain only genes that are shared between the reference and test networks
-            if (verbose > 1) printFlush(paste(spaces, "....working with set", tnet, "as test set"));
-            overlap=intersect(colnames(multiData[[ref]]$data),colnames(multiData[[tnet]]$data))
-            loc1=match(overlap, colnames(multiData[[ref]]$data))
-            loc2=match(overlap, colnames(multiData[[tnet]]$data))
-            refName = paste("ref_", setNames[ref],sep="")
-            colorRef = multiColor[[ref]][loc1]
-            if (dataIsExpr)
-            {
-              datRef=multiData[[ref]]$data[ , loc1]
-              datTest=multiData[[tnet]]$data[ , loc2]
-              if (!is.null(multiWeights))
-              {
-                weightsRef = multiWeights[[ref]]$data[, loc1];
-                weightsTest = multiWeights[[tnet]]$data[, loc2];
-              } else {
-                weightsRef = weightsTest = NULL;
-              }
-            } else {
-              datRef=multiData[[ref]]$data[loc1, loc1]
-              datTest=multiData[[tnet]]$data[loc2, loc2]
-            }
-            testName=setNames[tnet]
-            nRefGenes = ncol(datRef);
-              
-            #if(!is.na(multiColor[[tnet]][1])||length(multiColor[[tnet]])!=1)
-            if (.cvPresent(multiColor[[tnet]]))
-            {
-               colorTest=multiColor[[tnet]][loc2]
-            } else  {
-               colorTest=NA 
-            }
-            name=paste(refName,"vs",testName,sep="")
-            obsModSizes=list()
-            nObsMods = rep(0, 2);
-            tab = table(colorRef);
-            nObsMods[1] = length(tab);
-            obsModSizes[[1]]=tab[names(tab)!=greyName]
-            if ( !useInterpolation | (nObsMods[1] <= 5) | (sum(obsModSizes[[1]]) < 1000))
-            {
-               # Do not use interpolation: simply use original colors
-               permRefColors = colorRef;
-               interpolationUsed[tnet, iref] = FALSE;
-               nPermMods = nObsMods[1];
-               if (useInterpolation && (verbose > 1)) 
-                  printFlush(paste(spaces, "    FYI: interpolation will not be used for this comparison."))
-            } else {
-               obsModSizes[[1]][obsModSizes[[1]]<3]=3
-               if(length(colorTest)>1)
-               {
-                  tab = table(colorTest);
-                  obsModSizes[[2]]=tab[names(tab)!=greyName]
-                  obsModSizes[[2]][obsModSizes[[2]]<3]=3
-                  nObsMods[2] = length(tab);
-               } else {
-                  obsModSizes[[2]]=NA
-               }
-               # Note we only need permColors for the reference set.
-               nPermMods = 10
-               minNMods = 5;
-               OMS=obsModSizes[[1]]
-               logmin=log(min(OMS)); logmax= log(min(maxModuleSize,max( OMS)))
-               ok = FALSE;
-               skip = FALSE;
-               while (!ok)
-               {
-                  if (logmin>= logmax) logmax=logmin+nPermMods/2;
-                  permModSizes=as.integer(exp(seq(from=logmin, to=logmax, length=nPermMods )))
-                  nNeededGenes = sum(permModSizes)
-                  # Check that the data has enough genes to fit the module sizes:
-                  if (nNeededGenes < nRefGenes)
-                  {
-                     ok = TRUE; skip = FALSE;
-                  } else if (nPermMods > minNMods)
-                  {
-                     # Drop one module
-                     nPermMods = nPermMods -1;
-                     logStep = (logmax - logmin)/nPermMods;
-                     # If the modules are spaced far enough apart, also decrease the max module size
-                     if (logStep > log(2))
-                     {
-                        logmax = logmax - logStep;
-                     } 
-                  } else {
-                     # It appears we don't have enough genes to form meaningful modules for interpolation. 
-                     # Decrease logmin as well, but only to a certain degree. 
-                     logminFloor = 3;
-                     if (logmin > logminFloor)
-                     {
-                        logmin = min(logmin-1, logminFloor);
-                     } else {
-                        # For now we give up, but in the future may have to add a non-interpolation approach here
-                        # as well.
-                        printFlush(paste(spaces, 
-                                    "*+*+*+*+*+ There are not enough genes and/or modules for",
-                                    "reference set", ref, "and test set", tnet, ".\n",
-                                    spaces, "Will skip this combination."))
-                        ok = TRUE;
-                        skip = TRUE;
-                     }
-                  }
-               }
-      
-               if (skip) 
-               {
-                  # Instead of skipping, use the actual colors
-                  permRefColors = colorRef;
-                  interpolationUsed[tnet, iref] = FALSE;
-                  nPermMods = nObsMods[1];
-               } else {
-                  # Create a base label sequence for the permuted reference data set
-                  permRefColors = rep(c(1:nPermMods), permModSizes);
-                  nGrey = nRefGenes - length(permRefColors);
-                  permRefColors = c(permRefColors, rep(greyName, nGrey));
-                  interpolationUsed[tnet, iref] = TRUE;
-               }
-            }
-            
-            #permExpr=list()
-            #permExpr[[1]]=list(data=datRef)
-            #permExpr[[2]]=list(data=datTest)
-            permExpr = multiData(datRef, datTest);
-            names(permExpr) = setNames[c(ref, tnet)];
-            if (!is.null(multiWeights)) permWeights = multiData(weightsRef, weightsTest) else permWeights = NULL;
-            permOut[[iref]][[tnet]]=list(
-                      regStats = array(NA, dim = c(nPermMods+2-(!interpolationUsed[tnet, iref]), 
-                                                   nRegStats, nPermutations)),
-                      fixStats = array(NA, dim = c(nObsMods[[1]], nFixStats, nPermutations)));
-   
-            # Perform actual permutations
-            #oldRNG = NULL;
-            permColors = list();
-            permColors[[1]] = permRefColors;
-            permColors[[2]] = NA;
-            permColorsForAcc = list();
-            permColorsForAcc[[1]] = colorRef;
-            permColorsForAcc[[2]] = colorTest;
-
-            # For reproducibility of previous results, write separate code for threaded and unthreaded
-            # calculations
-
-            if (parallelCalculation)
-            {
-               combineCalculations = function(...)
-               {
-                 list(...);
-               }
-               seed = sample(1e8, 1);
-               if (verbose > 2) 
-                  printFlush(paste(spaces, " ......parallel calculation of permuted statistics.."));
-               datout = foreach(perm = 1:nPermutations, .combine = combineCalculations,
-                                .multicombine = TRUE, .maxcombine = nPermutations+10)%dopar% 
-               {
-                      set.seed(seed + perm + perm^2); 
-                      gc();
-                      .modulePreservationInternal(permExpr, permColors, multiWeights = permWeights,
-                                                  dataIsExpr = dataIsExpr,
-                                                  calculatePermutation = TRUE,
-                                                  multiColorForAccuracy = permColorsForAcc,
-                                                  networkType = networkType,
-                                                  corFnc = corFnc, corOptions = corOptions,
-                                                  referenceNetworks = 1, 
-                                                  testNetworks = list(2),
-                                                  densityOnly = useInterpolation,
-                                                  maxGoldModuleSize = maxGoldModuleSize,
-                                                  maxModuleSize = maxModuleSize, quickCor = quickCor,
-                                                  ccTupletSize = ccTupletSize,
-                                                  calculateCor.kIMall = calculateCor.kIMall,
-                                                  calculateClusterCoeff = calculateClusterCoeff,
-                                                  # calculateQuality = calculateQuality,
-                                                  greyName = greyName, goldName = goldName,
-                                                  checkData = FALSE,
-                                                  verbose = verbose -3, indent = indent + 3)
-               }
-               for (perm in 1:nPermutations)
-               {
-                 if (!datout[[perm]] [[1]]$netPresent[2])
-                 stop(paste("Internal error: no data in permuted set preservation measures. \n",
-                            "Please contact the package maintainers. Sorry!"))
-                 permOut[[iref]][[tnet]]$regStats[, , perm] = as.matrix(
-                           cbind(datout[[perm]] [[1]]$quality[[2]][, -1],
-                                 datout[[perm]] [[1]]$intra[[2]],
-                                 datout[[perm]] [[1]]$inter[[2]]));
-                 permOut[[iref]][[tnet]]$fixStats[, , perm] = as.matrix(datout[[perm]] [[1]]$accuracy[[2]]);
-               }
-               datout = datout[[1]] # For the name stting procedures that follow...
-            } else for (perm in 1:nPermutations ) 
-            {
-               if (verbose > 2) printFlush(paste(spaces, " ......working on permutation", perm));
-               #newRNG = .Random.seed;
-               #if (!is.null(oldRNG))
-               #  if (isTRUE(all.equal(newRNG, oldRNG)))
-               #    printFlush("WARNING: something's wrong with the RNG... old and new RNG equal.");
-               #oldRNG = .Random.seed
-               #set.seed(perm*2);
-               datout= .modulePreservationInternal(permExpr, permColors, 
-                              multiWeights = permWeights, dataIsExpr = dataIsExpr, 
-                              calculatePermutation = TRUE,
-                              multiColorForAccuracy = permColorsForAcc, 
-                              networkType = networkType,
-                              corFnc = corFnc, corOptions = corOptions,
-                              referenceNetworks=1, 
-                              testNetworks = list(2),
-                              densityOnly = useInterpolation,
-                              maxGoldModuleSize = maxGoldModuleSize,
-                              maxModuleSize = maxModuleSize, quickCor = quickCor,
-                              ccTupletSize = ccTupletSize,
-                              calculateCor.kIMall = calculateCor.kIMall,
-                              calculateClusterCoeff = calculateClusterCoeff,
-                              # calculateQuality = calculateQuality,
-                              greyName = greyName, goldName = goldName,
-                              checkData = FALSE, 
-                              verbose = verbose -3, indent = indent + 3)
-               if (!datout[[1]]$netPresent[2])
-                  stop(paste("Internal error: no data in permuted set preservation measures. \n",
-                             "Please contact the package maintainers. Sorry!"))
-               permOut[[iref]][[tnet]]$regStats[, , perm] = as.matrix(cbind(datout[[1]]$quality[[2]][, -1], 
-                                                                  datout[[1]]$intra[[2]], 
-                                                                  datout[[1]]$inter[[2]]));
-               permOut[[iref]][[tnet]]$fixStats[, , perm] = as.matrix(datout[[1]]$accuracy[[2]]);
-               gc();
-            }
-            regStatNames = c(colnames(datout[[1]]$quality[[2]])[-1], colnames(datout[[1]]$intra[[2]]), 
-                             colnames(datout[[1]]$inter[[2]]));
-            regModuleNames[[iref]][[tnet]] = rownames(datout[[1]]$quality[[2]]);
-            regModuleSizes[[iref]][[tnet]] = datout[[1]]$quality[[2]][, 1]
-            fixStatNames = colnames(datout[[1]]$accuracy[[2]]);
-            fixModuleNames = rownames(datout[[1]]$accuracy[[2]]);
-            dimnames(permOut[[iref]][[tnet]]$regStats) = list(regModuleNames[[iref]][[tnet]], regStatNames,
-                                                             spaste("Permutation.", c(1:nPermutations)));
-            dimnames(permOut[[iref]][[tnet]]$fixStats) = list(fixModuleNames, fixStatNames,
-                                                             spaste("Permutation.", c(1:nPermutations)));
-            permutationsPresent[tnet, iref] = TRUE
-          } else {
-            regModuleNames[[iref]][[tnet]] = NA;
-            regModuleSizes[[iref]][[tnet]] = NA;
-            permOut[[iref]][[tnet]] = NA;
-          }
-      }
-         
-      if (savePermutedStatistics) 
-         save(regModuleSizes, regStatNames, regModuleNames, fixStatNames, 
-              fixModuleNames, permutationsPresent, interpolationUsed, permOut, file=permutedStatisticsFile)
-   }  # if (!psLoaded)
-
-   gc();
-
-   if (any(interpolationUsed, na.rm = TRUE))
-   {
-      if (verbose > 0) printFlush(paste(spaces, "..Calculating interpolation approximations.."));
-      if (plotInterpolation) pdf(file = interpolationPlotFile, width = 12, height = 6)
-   }
-
-   # Define a "class" indicating that no valid fit was obtained
-
-   invalidFit = "invalidFit";
-     
-   LogIndex = c(rep(c(1, 0, 0, 0, 0, 0, 0), 2), 0, 0, 0, 0, 0, 0)
-   dfMean = c( rep(c(2, 2, 2, 1, 1, 1, 1), 2), 3, 3, 3, 2, 2, 2)
-   dfSD = c( rep(c(2, 2, 2, 2, 2, 2, 2), 2), 2, 2, 2, 2, 2, 2)
-
-   epsilon=0.00001
-   meanLM=list()
-   seLM=list()
-   OmitModule=c(permGoldName,permGreyName)
-   for (iref in 1:nRefNets) 
-   {
-      ref = referenceNetworks[iref];
-      meanLM[[iref]]=list()
-      seLM[[iref]]=list()
-      for (tnet in 1:nNets) if (observed[[iref]]$netPresent[tnet] & 
-                                permutationsPresent[tnet, iref] & interpolationUsed[tnet, iref]) 
-      {
-         NotGold = !is.element(regModuleNames[[iref]][[tnet]], OmitModule)
-         meanLM[[iref]][[tnet]] = list()
-         seLM[[iref]][[tnet]] = list()
-         logName=matrix("", sum(NotGold), 1) 
-         for (stat in 1:nRegStats)
-         {
-            means = c(apply(permOut[[iref]][[tnet]]$regStats[NotGold, stat, , drop = FALSE], c(1:2), 
-                         mean, na.rm=TRUE));
-            SD=try( c(apply(permOut[[iref]][[tnet]]$regStats[NotGold, stat, , drop = FALSE], c(1:2), 
-                         sd, na.rm = TRUE)),
-                    silent = TRUE);
-            if (class(SD)=='try-error') SD = NA;
-            if (any(is.na(c(means, SD))) )
-            {
-               meanLM[[iref]][[tnet]][[stat]] = NA;
-               class(meanLM[[iref]][[tnet]][[stat]]) = invalidFit;
-               seLM[[iref]][[tnet]][[stat]] = NA;
-               class(seLM[[iref]][[tnet]][[stat]]) = invalidFit;
-            } else {
-               modSizes = regModuleSizes[[iref]][[tnet]][NotGold];
-               xx = log(modSizes)
-               if(LogIndex[stat]==1) 
-               {
-                  means[means<epsilon]=epsilon
-                  yy=log(means)
-                  logName[stat] = "log"
-               } else{
-                  yy=means
-                  logName[stat] = ""
-               }
-               name1=regStatNames[stat];
-               name2 = paste(setNames[ref], "vs", setNames[tnet]);
-               meanLM[[iref]][[tnet]][[stat]]=lm(yy~ ns(xx, df=dfMean[stat] )) 
-               names( meanLM[[iref]][[tnet]])[stat]=paste(name1,"_meanInterpolation",sep="")
-               PredictedMedian=as.numeric( predict(meanLM[[iref]][[tnet]][[stat]]))
-               if(all(!is.na(means))&&length(table(means))>1)
-               {
-                  par(mfrow=c(1,2))
-                  par(mar = c(5, 5, 4, 1));
-                  SE = SD/sqrt(nPermutations);
-                  ymin = min(yy-SE, na.rm = TRUE)
-                  ymax = max(yy+SE, na.rm = TRUE)
-                  verboseScatterplot(xx,yy,xlab="Log module size",
-                                     ylab=paste(logName[stat],"Permutation median"),
-                                     main = paste("mean", name1, "\n", name2, "; "),
-                                     cex.axis = 1, cex.lab = 1, cex.main = 1.2,
-                                     ylim = c(ymin, ymax))
-                  try(errbar(xx,yy,yy+SE, yy-SE, add = TRUE), silent = TRUE)
-                  lines(xx[order(xx)], PredictedMedian[order(xx)] , col="red")
-                  verboseScatterplot(yy, PredictedMedian,xlab="Observed permutation median",
-                                     ylab="Predicted permutation median",
-                                     main = paste("mean", name1, "\n", name2, "\n"),
-                                     cex.axis = 1, cex.lab = 1, cex.main = 1.2)
-                  abline(0,1,col="green")
-               }
-               epsilon2=0.0000000001
-               SD[SD<epsilon2]=epsilon2
-                  
-               yy2=log(SD)
-               xx2=log(modSizes)
-               seLM[[iref]][[tnet]][[stat]]=lm(yy2~ ns(xx2, df=dfSD[stat] ) )
-               names(seLM[[iref]][[tnet]])[stat]=paste(name1,"_SDInterpolation",sep="")
-               PredictedSD=as.numeric( predict(seLM[[iref]][[tnet]][[stat]]))
-               if(all(!is.na(SD))&&length(table(SD))>1)
-               {
-                     par(mfrow=c(1,2))
-                     verboseScatterplot(xx2,yy2,xlab="Log Module Size",ylab="Log observed permutation SD",
-                                     main = paste("SD", name1, "\n", name2, "\n"),
-                                     cex.axis = 1, cex.lab = 1, cex.main = 1.2)
-                     lines(xx2[order(xx2)], PredictedSD[order(xx2)] , col="red")
-                     verboseScatterplot(yy2, PredictedSD,xlab="Log observed permutation SD",
-                                        ylab="Log predicted permutation SD",
-                                     main = paste("SD", name1, "\n", name2, "\n"),
-                                     cex.axis = 1, cex.lab = 1, cex.main = 1.2)
-                     abline(0,1,col="green")
-               }
-            } 
-         }
-      }      
-   }
+        # Retain only genes that are shared between the reference and test networks
+        overlap=intersect(colnames(multiData[[ref]]$data),colnames(multiData[[tnet]]$data))
+        loc1=match(overlap, colnames(multiData[[ref]]$data))
+        loc2=match(overlap, colnames(multiData[[tnet]]$data))
+        refName = paste("ref_", setNames[ref],sep="")
+        colorRef = multiColor[[ref]][loc1]
        
-   if (any(interpolationUsed))
-   {
-      if (plotInterpolation) dev.off();
-   }
+        datRef=multiData[[ref]]$data[loc1, loc1]
+        datTest=multiData[[tnet]]$data[loc2, loc2]
+
+        testName=setNames[tnet]
+        nRefGenes = ncol(datRef);
+
+        if (.cvPresent(multiColor[[tnet]]))
+        {
+           colorTest=multiColor[[tnet]][loc2]
+        } else  {
+           colorTest=NA 
+        }
+        name=paste(refName,"vs",testName,sep="")
+        obsModSizes=list()
+        nObsMods = rep(0, 2);
+        tab = table(colorRef);
+        nObsMods[1] = length(tab);
+        obsModSizes[[1]]=tab[names(tab)!=greyName]
+
+        permRefColors = colorRef;
+        nPermMods = nObsMods[1];
+
+        permExpr = multiData(datRef, datTest);
+        names(permExpr) = setNames[c(ref, tnet)];
+        if (!is.null(multiWeights)) permWeights = multiData(weightsRef, weightsTest) else permWeights = NULL;
+        permOut[[iref]][[tnet]]=list(
+                  regStats = array(NA, dim = c(nPermMods+2-(!interpolationUsed[tnet, iref]), 
+                                               nRegStats, nPermutations)),
+                  fixStats = array(NA, dim = c(nObsMods[[1]], nFixStats, nPermutations)));
+
+        # Perform actual permutations
+        permColors = list();
+        permColors[[1]] = permRefColors;
+        permColors[[2]] = NA;
+        permColorsForAcc = list();
+        permColorsForAcc[[1]] = colorRef;
+        permColorsForAcc[[2]] = colorTest;
+
+         combineCalculations = function(...)
+         {
+           list(...);
+         }
+         seed = sample(1e8, 1);
+         if (verbose > 2) 
+            printFlush(paste(spaces, " ......parallel calculation of permuted statistics.."));
+         datout = foreach(perm = 1:nPermutations, .combine = combineCalculations,
+                          .multicombine = TRUE, .maxcombine = nPermutations+10)%dopar% 
+         {
+                set.seed(seed + perm + perm^2); 
+                .modulePreservationInternal(permExpr, permColors, multiWeights = permWeights,
+                                            dataIsExpr = dataIsExpr,
+                                            calculatePermutation = TRUE,
+                                            multiColorForAccuracy = permColorsForAcc,
+                                            networkType = networkType,
+                                            corFnc = corFnc, corOptions = corOptions,
+                                            referenceNetworks = 1, 
+                                            testNetworks = list(2),
+                                            densityOnly = useInterpolation,
+                                            maxGoldModuleSize = maxGoldModuleSize,
+                                            maxModuleSize = maxModuleSize, quickCor = quickCor,
+                                            ccTupletSize = ccTupletSize,
+                                            calculateCor.kIMall = calculateCor.kIMall,
+                                            calculateClusterCoeff = calculateClusterCoeff,
+                                            # calculateQuality = calculateQuality,
+                                            greyName = greyName, goldName = goldName,
+                                            checkData = FALSE,
+                                            verbose = verbose -3, indent = indent + 3)
+         }
+         for (perm in 1:nPermutations)
+         {
+           permOut[[iref]][[tnet]]$regStats[, , perm] = as.matrix(
+                     cbind(datout[[perm]] [[1]]$quality[[2]][, -1],
+                           datout[[perm]] [[1]]$intra[[2]],
+                           datout[[perm]] [[1]]$inter[[2]]));
+           permOut[[iref]][[tnet]]$fixStats[, , perm] = as.matrix(datout[[perm]] [[1]]$accuracy[[2]]);
+         }
+         datout = datout[[1]] # For the name stting procedures that follow...
+
+        regStatNames = c(colnames(datout[[1]]$quality[[2]])[-1], colnames(datout[[1]]$intra[[2]]), 
+                         colnames(datout[[1]]$inter[[2]]));
+        regModuleNames[[iref]][[tnet]] = rownames(datout[[1]]$quality[[2]]);
+        regModuleSizes[[iref]][[tnet]] = datout[[1]]$quality[[2]][, 1]
+        fixStatNames = colnames(datout[[1]]$accuracy[[2]]);
+        fixModuleNames = rownames(datout[[1]]$accuracy[[2]]);
+        dimnames(permOut[[iref]][[tnet]]$regStats) = list(regModuleNames[[iref]][[tnet]], regStatNames,
+                                                         spaste("Permutation.", c(1:nPermutations)));
+        dimnames(permOut[[iref]][[tnet]]$fixStats) = list(fixModuleNames, fixStatNames,
+                                                         spaste("Permutation.", c(1:nPermutations)));
+        permutationsPresent[tnet, iref] = TRUE
+    }
+
+    if (savePermutedStatistics) 
+     save(regModuleSizes, regStatNames, regModuleNames, fixStatNames, 
+          fixModuleNames, permutationsPresent, interpolationUsed, permOut, file=permutedStatisticsFile)
 
    observedQuality = list();
    observedPreservation = list();
@@ -842,14 +221,9 @@ modulePreservation = function(
        sepCol = match("separability.qual", colnames(observed[[iref]]$quality[[tnet]]));
        sepCol2 = match("separability.pres", colnames(observed[[iref]]$intra[[tnet]]));
        quality = observed[[iref]]$quality[[tnet]][, -sepCol];
-       if (dataIsExpr | (!restrictSummaryForGeneralNetworks))
-       {
-         rankColsQuality = c(2,3,4,5)
-         rankColsDensity = c(1,2,3,4)
-       } else {
-         rankColsQuality = c(5)
-         rankColsDensity = 4;
-       }
+
+       rankColsQuality = c(5)
+       rankColsDensity = 4;
      
        ranks = apply(-quality[, rankColsQuality, drop = FALSE], 2, rank, na.last = "keep");
        medRank = apply(as.matrix(ranks), 1, median, na.rm = TRUE);
@@ -860,17 +234,9 @@ modulePreservation = function(
     
        ranksDensity = apply(-preservation[, rankColsDensity, drop = FALSE], 2, rank, na.last = "keep");
        medRankDensity = apply(as.matrix(ranksDensity), 1, median, na.rm = TRUE);
-       if (dataIsExpr | (!restrictSummaryForGeneralNetworks))
-       {
-         if (includekMEallInSummary)
-         {
-            connSummaryInd = c(7:10)
-         } else {
-            connSummaryInd = c(7,8,10);
-         }
-       } else {
-         connSummaryInd = c(7,10) # in this case only cor.kIM and cor.Adj which sits in the cor.cor slot
-       }
+       
+       connSummaryInd = c(7,10) # in case of adjacency input only cor.kIM and cor.Adj which sits in the cor.cor slot
+       
        ranksConnectivity = apply(-preservation[, connSummaryInd, drop = FALSE], 2, rank, na.last = "keep");
        medRankConnectivity = apply(as.matrix(ranksConnectivity), 1, median, na.rm = TRUE);
        medRank = apply(cbind(ranksDensity, ranksConnectivity), 1, median, na.rm = TRUE);
