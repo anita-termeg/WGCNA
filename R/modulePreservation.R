@@ -99,9 +99,8 @@ modulePreservation = function(
 
         permExpr = multiData(datRef, datTest);
         names(permExpr) = setNames[c(ref, tnet)];
-        if (!is.null(multiWeights)) permWeights = multiData(weightsRef, weightsTest) else permWeights = NULL;
         permOut[[iref]][[tnet]]=list(
-                  regStats = array(NA, dim = c(nPermMods+2-(!interpolationUsed[tnet, iref]), 
+                  regStats = array(NA, dim = c(nPermMods+1, 
                                                nRegStats, nPermutations)),
                   fixStats = array(NA, dim = c(nObsMods[[1]], nFixStats, nPermutations)));
 
@@ -118,13 +117,11 @@ modulePreservation = function(
            list(...);
          }
          seed = sample(1e8, 1);
-         if (verbose > 2) 
-            printFlush(paste(spaces, " ......parallel calculation of permuted statistics.."));
          datout = foreach(perm = 1:nPermutations, .combine = combineCalculations,
                           .multicombine = TRUE, .maxcombine = nPermutations+10)%dopar% 
          {
                 set.seed(seed + perm + perm^2); 
-                .modulePreservationInternal(permExpr, permColors, multiWeights = permWeights,
+                .modulePreservationInternal(permExpr, permColors,
                                             dataIsExpr = dataIsExpr,
                                             calculatePermutation = TRUE,
                                             multiColorForAccuracy = permColorsForAcc,
@@ -462,22 +459,13 @@ modulePreservation = function(
     netPresent = rep(FALSE, nNets)
     for (tnet in testNetworks[[iref]])
     {
-       overlap=intersect(colnames(multiData[[ref]]$data),colnames(multiData[[tnet]]$data))
-       loc1=match(overlap, colnames(multiData[[ref]]$data))
-       loc2=match(overlap, colnames(multiData[[tnet]]$data))
-       if(length(multiColor[[tnet]])>1)
-       {
-          colorTest=multiColor[[tnet]][loc2]
-       } else  {
-          colorTest=NA 
-       }
+      overlap=intersect(colnames(multiData[[ref]]$data),colnames(multiData[[tnet]]$data))
+      loc1=match(overlap, colnames(multiData[[ref]]$data))
+      loc2=match(overlap, colnames(multiData[[tnet]]$data))
       datTest=multiData[[tnet]]$data[loc2, loc2]
       datRef=multiData[[ref]]$data[loc1, loc1]
       colorRef=multiColor[[ref]][loc1]
-       
-      colorRefAcc = colorRef;
-      colorTestAcc = colorTest; #This is the only place where colorTest is used (?)
-
+  
        # Accuracy measures
 
        if (calculatePermutation)
